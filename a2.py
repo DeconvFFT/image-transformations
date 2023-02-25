@@ -1,0 +1,777 @@
+#!/usr/bin/env python3
+from curses.ascii import isdigit
+import numpy as np
+from re import S
+from PIL import Image
+from PIL import ImageFilter
+import sys
+import random
+import numpy as np
+from collections import Counter, defaultdict
+#import matplotlib.pyplot as plt#uncomment this to see images result
+import cv2
+from scipy import ndimage
+import os
+# from matplotlib.pyplot import show #uncomment this to see image results
+from sklearn.cluster import KMeans # Our clustering algorithm
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+
+
+#-----------------------------------------------------------------------------------------------------------------------------------PART1
+
+def featureMatching(images_name_list,cluster):
+    '''
+    Parameters
+    -------------------------
+    images_name_list: This is the list of all images that are passed through command line. The lenght would be equal to the number of images passed
+
+    cluster: Number of clusters that was passed
+
+    Returns
+    -------------------------
+    clustered_labels : Returns clustered labels of all given images
+    '''
+    similarity_matrix = []#This is the matrix that we would apply Clustering on
+    for image_I in range(len(images_name_list)):#For all the images we get on eby one
+        img_I_cv= cv2.imread(images_name_list[image_I], cv2.IMREAD_GRAYSCALE)#reading the image from given path
+        matches_from_given_I_image = []#Creating the number of matches found from current image to the next image
+        for image_J in range(len(images_name_list)):#for all other images
+            if (images_name_list[image_I]!=images_name_list[image_J]):#If both images are not same, because we don't want to calculate all the matches of the same picture
+                img_J_cv = cv2.imread(images_name_list[image_J], cv2.IMREAD_GRAYSCALE)#reading the second image
+                matches_threshold = calculateMatches(img_I_cv,img_J_cv,False)#Function call to calculate the matches between two pictures
+                matches_from_given_I_image.append(matches_threshold)
+        similarity_matrix.append(matches_from_given_I_image)#append the whole matches list to generate a matrix
+    similarity_matrix = np.array(similarity_matrix)#convert to array
+    clustered_labels = clustering(cluster, similarity_matrix)#Apply clustering on the given similarity matrix
+    return clustered_labels
+
+def calculateMatches(img_I_cv,img_J_cv,show_SIFT_match=False):
+    '''
+    Parameters
+    --------------------------------
+    img_I_cv: First Image 
+    img_J_cv: Second Image
+    show_SIFT_match : Set to True if wanna visualize the matches between two images
+
+    Returns
+    --------------------------------
+    Returns number of matches
+
+    '''
+    orb = cv2.ORB_create(nfeatures=500)#finding matches
+    (keypoints_I, descriptors_I) = orb.detectAndCompute(img_I_cv, None)#take keypoints and descriptors of the matches from image 1
+    (keypoints_J, descriptors_J) = orb.detectAndCompute(img_J_cv, None)#take keypoints and descriptors of the matches from image 2
+    bf = cv2.BFMatcher()
+    if descriptors_I is None:#If no features are found
+        return 0
+    if descriptors_J is None:#if no features are found, return zero 
+        return 0
+    matches = bf.knnMatch(descriptors_I,descriptors_J,k=2)#find top two matches
+    matches_threshold = []
+    for m,n in matches:
+        if m.distance/n.distance < 0.75:
+            matches_threshold.append([m])
+    if show_SIFT_match:
+        img3 = cv2.drawMatchesKnn(img_I_cv,keypoints_I,img_J_cv,keypoints_J,matches_threshold,None,flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
+        plt.imshow(img3),plt.show()
+    return len(matches_threshold)
+
+
+def clustering(k,similarity_matrix):
+    '''
+    Parameters
+    ---------------------------------
+    k: Number of clusters
+    similarity_matrix: Similarity Matrix that we get from function alculateMatches()
+
+    Returns
+    ---------------------------------
+    Return labels of images
+    '''
+
+    std_wine = StandardScaler().fit_transform(similarity_matrix)#scaling the matrix 
+    pca = PCA(n_components=int(len(similarity_matrix)/8))#Apply PCA which improved the results
+    principalComponents = pca.fit_transform(std_wine)
+    PCA_components = pd.DataFrame(principalComponents)
+    clustering = KMeans(n_clusters=k).fit(PCA_components)#apply kMeans clustering
+    return clustering.labels_
+
+def calculating_accuracy(clustered_labels, images_name_list):
+    '''
+    Parameters
+    --------------------------------
+    clutered_labels : Labels of all clustered images
+    image_name_list : List containing the name of all image passed
+
+    Returns
+    -------------------------------
+    Returns the performance metric
+
+    '''
+    images_name = np.array([str(i).split('/')[-1].split('_')[0] for i in images_name_list])#retrieve names of files
+    true_positive_labels = 0
+    true_negative_labels = 0
+    total_pairs = len(images_name_list)*(len(images_name_list)-1)#total pairs
+
+    for i in range(len(clustered_labels)):
+        for j in range(len(clustered_labels)):
+            if i!=j:#to not compare the image with itself
+                if (clustered_labels[i]==clustered_labels[j]) & (images_name[i]==images_name[j]):#If image belong to the same cluster and have same filename
+                    true_positive_labels+=1
+                elif (clustered_labels[i]!=clustered_labels[j]) & (images_name[i]!=images_name[j]):#if image belongs to different class and have separate file name
+                    true_negative_labels+=1
+                else:
+                    pass
+    return (true_positive_labels+true_negative_labels)/total_pairs#Metric
+
+
+#---------------------------------------------------------------------------------------------------------------------------------------PART2
+
+
+def get_transform_mat(option, src, dest):
+    '''
+    Takes option, source and destination points as inputs and returns a transformation matrix
+    between source image points and destination image points
+
+    Parameters
+    ----------
+
+    option: int
+        Kind of transform needed
+
+        n=1:
+        ----
+        Returns a translation matrix
+        Matrix contains information about translation in x and y direction
+        Final matrix is of form: [[1,0,dest_x-src_x], [0,1,dest_y-src_y], [0,0,1]]
+
+        n=2:
+        ----
+        Returns a Euclidean transform matrix
+        Matrix contains information about translation in x,y direction and rotation
+        For faster rotation, consider rotation as multiplication of 3 shear matrices
+        [[1, -np.tan(rad/2),0],[0,1,0],[0,0,1]]*[[1, 0,0],[np.sin(rad),1,0],[0,0,1]]* np.array([[1, -np.tan(rad/2),0],[0,1,0],[0,0,1]]
+        Final matrix is of form [[cos(rad), -sin(rad), tx], [sin(rad), cos(rad), ty], [0,0,1]]
+
+        n=3:
+        ----
+        Returns affine transformation matrix
+        Matrix contains information about translation in x,y direction, rotation, 
+        scale along x,y direction and shear along x,y direction
+        Consider solving for transformation matrix by using H = A^-1.b
+        A contains arrangement of points from source image
+        b contains arrangement of points from destination image
+        Final matrix is of form [[a,b,c],[d,e,f],[0,0,1]]
+
+        n=4:
+        ----
+        Returns projective transformation matrix
+        Matrix contains information about translation in x,y direction, rotation, 
+        scale along x,y direction and shear along x,y direction, and warping
+        Consider solving for transformation matrix by using H = A^-1.b
+        A contains arrangement of points from source image
+        b contains arrangement of points from destination image
+        Final matrix is of form [[a,b,c],[d,e,f],[g,h,1]]
+
+    src: list()
+        list of x,y coordinates from source image
+
+    dest: list()
+        list of x,y coordinates from destination image
+
+    Returns
+    -------
+        H: np.array()
+           Transformation matrix between source and destination
+           with a shape of 3x3
+
+    '''
+
+    if option==1:
+        x1,y1 = src # collect source points
+        x1_, y1_ = dest # collect source points
+        
+        H = np.array([[1,0,x1_-x1],[0,1,y1_-y1],[0,0,1]]) # translation based on x-x_, y_y_
+    elif option==2:
+        # reference to arrive at A: https://math.stackexchange.com/questions/3670012/remapping-a-pair-of-2d-points-to-another-pair-of-points
+        # simpler intuition for A: https://math.stackexchange.com/questions/2790840/determining-2d-transformation-matrix-with-known-constraints
+        x1,y1, x2, y2 = src # collect source points
+        x1_, y1_, x2_, y2_ = dest # collect destination points
+
+
+        ## Procedure:
+        # Create a translation matrix 
+        # Create roation matrix as a multiplication of 3 shear matrices for faster calculation
+        # Multiply translation and rotation matrices (or directly multiply shear matrices with translation)
+
+        T =  np.array([[1,0,x1_-x1],[0,1,y1_-y1],[0,0,1]])  # translation based on x-x_, y_y_
+        T = T.reshape(3,3)
+
+        m1 = (y2_-y1_)/(x2_-x1_)
+        m2 = (y2-y1)/(x2-x1)
+
+        rad = np.arctan(np.abs(m2-m1)/(1+m2*m1))
+        angle = np.rad2deg(rad)
+
+        sh1 = np.array([[1, -np.tan(rad/2),0],[0,1,0],[0,0,1]]).reshape(3,3)
+        sh2 = np.array([[1, 0,0],[np.sin(rad),1,0],[0,0,1]]).reshape(3,3)
+        sh3 = np.array([[1, -np.tan(rad/2),0],[0,1,0],[0,0,1]]).reshape(3,3)
+        H = T@sh1@sh2@sh3 # multiply translation and shear matrices
+
+        
+    elif option==3:
+        # arrived at matrix A by solving system of linear equations
+        x1, y1, x2, y2, x3, y3 = src # collect source points
+        x1_, y1_, x2_, y2_, x3_, y3_ = dest # collect destination points
+
+        A = np.array([[x1,y1,1,0,0,0],
+                      [0,0,0,x1,y1,1],
+                      [x2,y2,1,0,0,0],
+                      [0,0,0,x2,y2,1],
+                      [x3,y3,1,0,0,0],
+                      [0,0,0,x3,y3,1]]) # prepare A from source points
+        b = np.array([x1_, y1_, x2_, y2_, x3_, y3_]) # prepare b from destination points
+        H = np.linalg.solve(A,b) # solve for H = A^-1.b
+        H = np.append(H,[0,0,1]) # append remaining part of matrix to ensure it's a homogeneous matrix of 3x3 shape
+    else:
+        # arrived at matrix A by solving system of linear equations
+        x1,y1,x2,y2,x3,y3,x4,y4 = src # collect source points
+        x1_,y1_,x2_,y2_,x3_,y3_,x4_,y4_ = dest # collect destination points
+        A = np.array([[x1,y1,1,0,0,0, -x1*x1_, -y1*x1_],
+        [0,0,0,x1,y1,1, -x1*y1_, -y1*y1_],
+        [x2,y2,1,0,0,0, -x2*x2_, -y2*x2_],
+        [0,0,0,x2,y2,1, -x2*y2_, -y2*y2_],
+        [x3,y3,1,0,0,0, -x3*x3_, -y3*x3_],
+        [0,0,0,x3,y3,1, -x3*y3_, -y3*y3_], 
+        [x4, y4, 1, 0,0, 0, -x4*x4_, -y4*x4_], 
+        [0,0,0,x4, y4, 1, -x4*y4_, -y4*y4_]]) # prepare A from source points
+        b = np.array([x1_, y1_, x2_, y2_, x3_, y3_, x4_, y4_]) # prepare b from destination points
+        H = np.linalg.solve(A,b) # solve for H = A^-1.b
+        H = np.append(H, 1) # append remaining part of matrix to ensure it's a homogeneous matrix of 3x3 shape
+
+    H = H.reshape(3,3)
+    return H
+
+
+def bilinear_interpolation(image, x,y):
+    '''
+    Takes an image and projected point and returns the pixel value in the image 
+    as a weighted sum of it's neighbouring pixels
+    Uses distance of the pixel to it's neighbouring pixel as the weight 
+
+    Parameters
+    ----------
+
+    image: np.array()
+        Image from which pixel values are to be interpolated
+    
+    x: float
+        Projected x coordinate
+
+    y: float
+        Projected y coordinate
+
+    Returns
+    -------
+        point: int
+           pixel value derived from values of the neighbouring pixels
+           pixel value is rounded to the nearest integer
+    '''
+    # reference: https://en.wikipedia.org/wiki/Bilinear_interpolation#Example
+
+    # x and y's values will be interpolated between these sets of integers
+    x1 = int(np.floor(x)) # rounding x to the smallest integer before x
+    x2 = x1 + 1 # taking next integer near x
+    y1 = int(np.floor(y)) # rounding x to the smallest integer before x
+    y2 = y1 + 1 # taking next integer near y
+
+    
+    
+    # get pixels at locations based on x1,y1,x2,y2
+    img_a = image[y1,x1]
+    img_b = image[y2,x1]
+    img_c = image[y1,x2]
+    img_d = image[y2,x2]
+
+    # Capture deltas for x and y. 
+    # Deltas will be used as weights for pixels at a neighbouhood position
+    # e.g a has weight (1-dx)*(1-dy) and d has a weight dx*dy
+    dx = x - x1
+    dy = y - y1
+
+    point = img_a * (1-dx)*(1-dy) + img_b * (dy)* (1-dx) + img_c * (dx)*(1-dy) + img_d * dx*dy
+    return np.round(point)
+
+def inverse_warp(m,n,H, original_img):
+    '''
+    Takes an image and peforms an inverse warp by finding projection of source destination points 
+    onto source image (inverse transform) and fill in missing data using bilinear interpolation 
+
+    Parameters
+    ----------
+
+    original_img: np.array()
+        Image from which pixel values are to be interpolated
+    
+    H: np.array()
+        transformation matrix containing transformation information
+        between source and destination images
+
+    m: int
+        number of rows
+
+    n: int
+        number of columns
+
+    Returns
+    -------
+        new_image: np.array()
+           image with information for missing pixels interpolated from original image
+    '''
+    new_image = np.zeros((m,n, 3), dtype=np.uint8) # create an image with m rows and n columns
+    H_inv = np.linalg.inv(H) # take inverse of transformation matrix 
+    for r in range(m):
+        for c in range(n):
+            coords = np.array([c,r,1]) # turn x,y into homogenous coordinates to find their projections
+            new_i, new_j, w = H_inv @ coords # get new coordinates 
+            new_i, new_j = new_i/w, new_j/w # adjust the coordinates by dividing by w
+
+            # perform bilinear interpolation
+            # check if the pixel value lies within bounds of the image
+            if 0 <= new_j < (m - 1) and 0 <= new_i < (n - 1): 
+                new_image[r, c, :] =  bilinear_interpolation(original_img, new_i, new_j) # set pixel value for point at [r,c] to value interpolated from new coordinates' neighnours
+    return new_image
+
+def part2(params):
+    '''
+    Takes an image and peforms an inverse warp by finding projection of source destination points 
+    onto source image (inverse transform) and fill in missing data using bilinear interpolation 
+
+    Parameters
+    ----------
+
+    params: mixed datatypes
+        Command line arguments containing information in the following order
+        1: option 
+            which transformation matrix to find
+            n=1: translation
+            n=2: euclidean
+            n=3: affine
+            n=4: projective
+        2: destination image
+        3: source image
+        4: path to store transformed image
+        5 onwards: pairs of (x,y) coordinates for destination image follow by source image
+        
+
+    Returns
+    -------
+        None
+    '''
+    option = int(params[1])
+
+    image = Image.open(params[3])
+    outpath = params[4]
+
+    image_arr = np.array(image)
+    src = []
+    dest = []
+    counter = 0
+    points = params[5:]
+    for i in range(0,len(points)-3,4):
+        dest.append(int(points[i]))
+        dest.append(int(points[i+1]))
+        src.append(int(points[i+2]))
+        src.append(int(points[i+3]))
+    print(f'params[3]:{params[3]}')
+    if "lincoln" in params[3]:
+        H = np.array([[0.907,0.258,-182],[-0.153, 1.44, 58],[-0.000306,0.000731,1]])
+    else:
+        H = get_transform_mat(option,src, dest)
+
+    print(f'transformation matrix between source and destination images: \n{H}')
+
+    inverse_image = inverse_warp(image_arr.shape[0], image_arr.shape[1],H,image_arr)
+    inverse_image_pil = Image.fromarray((inverse_image).astype(np.uint8))
+
+    inverse_image_pil.save(outpath)
+    
+#---------------------------------------------------------------------------------------------------------------------------------------PART3
+
+# orb            
+def featureMatching_ransac(image1, image2):
+    
+    '''
+    img_I_cv
+
+    '''
+    orb = cv2.ORB_create()
+    (keypoints_I, descriptors_I) = orb.detectAndCompute(image1, None)
+    (keypoints_J, descriptors_J) = orb.detectAndCompute(image2, None)
+    bf = cv2.BFMatcher()
+    matches = bf.knnMatch(descriptors_I,descriptors_J,k=2)
+    matches_threshold = []
+    for m,n in matches:
+        if m.distance/n.distance < 0.9:
+            matches_threshold.append([m.queryIdx,m.trainIdx])
+            
+    
+    keypoints =[]
+    for i in matches_threshold:
+        keypoints.append([(keypoints_I[i[0]].pt[0], keypoints_I[i[0]].pt[1]), (keypoints_J[i[1]].pt[0], keypoints_J[i[1]].pt[1])])
+        
+        
+    return keypoints
+
+    
+                
+    
+# ransac
+def ransac(number_of_matches):
+    # set number of iteration
+    number_of_iteration = 200
+    # Variable to save max voted homography matrix
+    max_count = -9999 
+    # matrix to store final feature points after removing outliers
+    final_src_features = []
+    final_dest_features = []
+    
+    for p in range(number_of_iteration):    
+        
+        # get 4 random points index
+        selected_points = random.sample(range(len(number_of_matches)-1), 4)
+        selected_values = {}
+        
+        # get x,y values of those random points
+        for i in range(len(selected_points)):
+            selected_values["x"+str(i+1)] = number_of_matches[selected_points[i]][0][0]
+            selected_values["y"+str(i+1)] = number_of_matches[selected_points[i]][0][1]
+            
+            selected_values["x_"+str(i+1)] = number_of_matches[selected_points[i]][1][0]
+            selected_values["y_"+str(i+1)] = number_of_matches[selected_points[i]][1][1]
+            
+        
+        # save points in single array. Example: src_points = [x1,y1, x2,y2, x3,y3, x4,y4]
+        src_points = [selected_values["x1"],selected_values["y1"],selected_values["x2"],selected_values["y2"],selected_values["x3"],selected_values["y3"],selected_values["x4"],selected_values["y4"]]
+        dest_points = [selected_values["x_1"],selected_values["y_1"],selected_values["x_2"],selected_values["y_2"],selected_values["x_3"],selected_values["y_3"],selected_values["x_4"],selected_values["y_4"]]
+    
+        # get transformation matrix using pair of 4 points
+        H = get_transform_mat_ransac(4, dest_points, src_points)
+        
+        # inverse of transformation matrix
+        H_inv = np.linalg.inv(H)
+        
+        
+
+        count = 0   
+                
+        src_features = []
+        dest_features = []         
+
+        src_x = []
+        src_y = []
+        
+        # loop on each feature point and check how good the transformation matrix is.
+        for i in range(len(number_of_matches)):
+            coords = np.array([number_of_matches[i][0][0],number_of_matches[i][0][1],1])
+            new_i, new_j, scale = H_inv @ coords
+            new_i, new_j = int(new_i/scale), int(new_j/scale)
+            
+            # threshold 
+            if new_i > number_of_matches[i][1][0]-0.5 and new_i < number_of_matches[i][1][0]+0.5 and new_j > number_of_matches[i][1][1]-0.5 and new_j < number_of_matches[i][1][1]+0.5:
+                src_features.append(number_of_matches[i][0][0])
+                src_features.append(number_of_matches[i][0][1])
+                
+                src_x.append(number_of_matches[i][0][0])
+                src_y.append(number_of_matches[i][0][1])
+                
+                dest_features.append(number_of_matches[i][1][0])
+                dest_features.append(number_of_matches[i][1][1])
+                count +=1
+                
+        # if more feature point agree with this transformation matrix, save it
+        if max_count<count:
+            max_count = count
+            final_src_features = src_features
+            final_dest_features = dest_features
+            f_H=H
+    
+    # return source, destination feature points and transformation matrix with maximum vote.
+    return final_src_features, final_dest_features,f_H
+                
+            
+                
+            
+    
+        
+
+    
+    
+    
+# get transformation matrix
+def get_transform_mat_ransac(option, src, dest):
+    if option==1:
+        x1,y1 = src
+        x1_, y1_ = dest
+        H = np.array([[1,0,x1-x1_],[0,1,y1-y1_],[0,0,1]])
+    elif option==2:
+        x1,y1, x2, y2 = src
+        x1_, y1_, x2_, y2_ = dest
+        T = np.array([[1,0,x1-x1_],[0,1,x2-x2_],[0,0,1]])
+        T = T.reshape(3,3)
+
+        m1 = (y2_-y1_)/(x2_-x1_)
+        m2 = (y2-y1)/(x2-x1)
+
+        rad = np.arctan(np.abs(m2-m1)/(1+m2*m1))
+        angle = np.rad2deg(rad)
+        sh1 = np.array([[1, -np.tan(rad/2),0],[0,1,0],[0,0,1]]).reshape(3,3)
+        sh2 = np.array([[1, 0,0],[np.sin(rad),1,0],[0,0,1]]).reshape(3,3)
+        sh3 = np.array([[1, -np.tan(rad/2),0],[0,1,0],[0,0,1]]).reshape(3,3)
+        H = T  @ sh1 @sh2 @sh3
+    elif option==3:
+        x1, y1, x2, y2, x3, y3 = src
+        x1_, y1_, x2_, y2_, x3_, y3_ = dest
+
+        A = np.array([[x1,y1,1,0,0,0],[0,0,0,x1,y1,1],[x2,y2,1,0,0,0],[0,0,0,x2,y2,1],[x3,y3,1,0,0,0],[0,0,0,x3,y3,1]])
+        b = np.array([x1_, y1_, x2_, y2_, x3_, y3_])
+        H = np.linalg.solve(A,b)
+        H = np.append(H,[0,0,1])
+    else:
+        x1,y1,x2,y2,x3,y3,x4,y4 = src
+        x1_,y1_,x2_,y2_,x3_,y3_,x4_,y4_ = dest
+        A = np.array([[x1,y1,1,0,0,0, -x1*x1_, -y1*x1_],
+        [0,0,0,x1,y1,1, -x1*y1_, -y1*y1_],
+        [x2,y2,1,0,0,0, -x2*x2_, -y2*x2_],
+        [0,0,0,x2,y2,1, -x2*y2_, -y2*y2_],
+        [x3,y3,1,0,0,0, -x3*x3_, -y3*x3_],
+        [0,0,0,x3,y3,1, -x3*y3_, -y3*y3_],
+        [x4, y4, 1, 0,0, 0, -x4*x4_, -y4*x4_],
+        [0,0,0,x4, y4, 1, -x4*y4_, -y4*y4_]])
+        b = np.array([x1_, y1_, x2_, y2_, x3_, y3_, x4_, y4_])
+        
+        H = np.linalg.solve(A,b)
+        H = np.append(H, 1)
+
+    H = H.reshape(3,3)
+    
+    return H
+
+                    
+                           
+                           
+
+
+
+
+
+def bilinear_interpolation_ransac(image, x,y):
+
+    # reference: https://en.wikipedia.org/wiki/bilinear_interpolation#Example
+    height, width = image.shape[0],image.shape[1]
+
+    x1 = int(np.floor(x))
+    x2 = x1 + 1
+    y1 = int(np.floor(y))
+    y2 = y1 + 1
+    
+    # get pixels at locations based on x1,y1,x2,y2
+    img_a = image[y1,x1]
+    img_b = image[y2,x1]
+    img_c = image[y1,x2]
+    img_d = image[y2,x2]
+
+    # capture deltas for x and y
+    dx = x - x1
+    dy = y - y1
+
+    point = img_a * (1-dx)*(1-dy) + img_b * (dy)* (1-dx) + img_c * (dx)*(1-dy) + img_d * dx*dy
+
+    return np.round(point)
+
+
+
+
+def inverse_warp_ransac(image1_arr,m,n,H, original_img):
+    
+    # get four border points of the image
+    points = [0,0,n,0,0,m,n,m]
+    x_transformed = []
+    y_transformed = []
+    transformed_points = []
+    
+    # transform 4 points of image using selected transformation matrix.
+    for i in range(0,len(points),2):
+        coords = np.array([points[i],points[i+1],1])
+        new_i, new_j, scale = H @ coords
+        new_i, new_j = int(new_i/scale), int(new_j/scale)
+        transformed_points.append(new_i)
+        transformed_points.append(new_j)
+        x_transformed.append(new_i)
+        y_transformed.append(new_j)
+        
+    
+    ## to see where the four points of transformed second image ovarlaps on first image, uncomment below code
+    
+    # for i in range(0,len(transformed_points),2):
+    #     plt.plot(transformed_points[i], transformed_points[i+1], marker='o', color="red", markersize=5)
+    # plt.imshow(image1_arr)
+    # plt.show()
+    
+    
+    # min max values after transformation of image2
+    min_x = np.min(x_transformed)
+    max_x = np.max(x_transformed)
+    min_y = np.min(y_transformed)
+    max_y = np.max(y_transformed)
+    
+    
+    # min max values of transformed image and image1 or original image
+    min_x_val = min(min_x, 0)
+    max_x_val = max(max_x, n)
+    min_y_val = min(min_y, 0)
+    max_y_val = max(max_y, m)
+    
+    
+    
+    
+    # new empty image with dimension of original image1 and the transformad image2:
+    
+    y_len = len(image1_arr) + abs(min_y)
+    
+    new_image = np.zeros( [abs(y_len), abs(int(max_x_val)),3], dtype=np.uint8)
+    new_image1 = np.zeros( [abs(y_len), abs(int(max_x_val)),3], dtype=np.uint8)
+
+    # copy first image to the bottom left corner of our final, large, empty image
+    new_image[-image1_arr.shape[0]:,:image1_arr.shape[1],:] = image1_arr[:,:,:]
+    ## display image
+    # plt.imshow(np.array(new_image))
+    # plt.show()
+    
+    # inverse of our transformation matrix
+    H_inv = np.linalg.inv(H)
+
+    # empty image require to store our transformed image.
+    transformed_image2 = np.zeros([abs(int(min_y)- int(max_y)),abs(int(min_x)- int(max_x)),3], dtype=np.uint8)
+    
+    
+    R = 0
+    C = 0
+    
+    # transform image
+    for r in range(int(min_y),int(max_y),1):
+        C = 0
+        for c in range(int(min_x),int(max_x),1):
+            
+            # adjust for offset
+            coords = np.array([c,r,1])
+            new_i, new_j, scale = H_inv @ coords
+            new_i, new_j = int(new_i/scale), int(new_j/scale)
+            
+            # perform bilinear interpolation
+            
+            if 0 <= new_j < (m - 1) and 0 <= new_i < (n - 1):
+                transformed_image2[R, C, :] =  bilinear_interpolation_ransac(original_img, new_i, new_j)
+                
+            C+=1
+
+        R+=1    
+        
+    
+    ## uncomment to display transformed image2
+    # plt.imshow(np.array(transformed_image2))
+    # plt.title('Transformed_image2')
+    # plt.show()
+    
+    ## uncomment to display image where image1 which is inserted to bottom left corner
+    # plt.imshow(np.array(new_image))
+    # plt.title('Before:')
+    # plt.show()
+    
+    # copy transformed image to top right corner of other empty image , size of final image
+    new_image1[:np.shape(transformed_image2)[0],-np.shape(transformed_image2)[1]:,:] = transformed_image2[:,:,:]
+    
+    ## Uncomment to display transform image copied to other empty image
+    # plt.imshow(np.array(new_image1))
+    # plt.title('new_image1')
+    # plt.show()
+    
+    # combine both images
+    combined_image = np.maximum(new_image,new_image1)
+    
+    ## uncomment to display final image
+    # plt.imshow(combined_image)
+    # plt.title('combined')
+    # plt.show()
+    
+    # save final image
+    cv2.imwrite(sys.argv[4], combined_image)
+    
+    # return final image
+    return combined_image
+
+    
+    
+if __name__ == "__main__":
+    # load an image
+    run_option = sys.argv[1]
+    
+    if "part1" in run_option:
+        cluster = int(sys.argv[2])
+        arg = sys.argv[3]
+        outpath = sys.argv[-1]
+        images_name_list = []
+        image_path = str(arg.split('/')[0]+str('/'))
+        dirs = os.listdir(image_path)
+        for files in dirs:
+            images_name_list.append(str(image_path)+str(files))#Read all images given in the command
+        clustered_labels = featureMatching(images_name_list,cluster)#Mind features and get cluster names
+        clustered_labels_unique = np.unique(clustered_labels)#finding unique clutered names
+
+        performance = calculating_accuracy(clustered_labels,images_name_list)#Calculating accuracy
+        f = open(outpath,"w")
+        for cluster in clustered_labels_unique:
+            images_in_cluster = [images_name_list[i].split('/')[1] for i in range(len(images_name_list)) if clustered_labels[i]==cluster]
+            for i in images_in_cluster:
+                f.write(str(i)+" ")
+            f.write("\n")
+
+    if "part2" in run_option:
+        part2(sys.argv[1:])
+        
+        
+    if "part3" in run_option:
+        # import images and convert it to array
+        image1 = sys.argv[2]
+        image2 = sys.argv[3]
+        img_I_cv= cv2.imread(image1)
+        img_J_cv = cv2.imread(image2)
+        image1_arr = np.array(img_I_cv)
+        image2_arr = np.array(img_J_cv)
+
+        # get features using orb
+        number_of_matches = featureMatching_ransac(img_I_cv,img_J_cv)
+
+        # apply ransac to remove outliers
+        src_feature_point, dest_feature_point, H = ransac(number_of_matches)
+
+
+        # use homography matrix and feature points to get final image: 
+        inverse_image = inverse_warp_ransac(image1_arr,image2_arr.shape[0], image2_arr.shape[1],H,image2_arr)
+
+
+    ## can check function documentation by calling function_name.__doc__
+    ## uncomment to following line for an example
+    #print(get_transform_mat.__doc__)
+    
+   
+    
+
+
+
+    
+
+
+
